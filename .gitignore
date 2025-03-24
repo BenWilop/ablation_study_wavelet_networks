@@ -1,0 +1,14 @@
+.idea/*
+data/*
+*.DS_STORE
+*.pyc
+
+eerie/groups/SE2.py
+eerie/nn/layers.py
+eerie/nn/functional/bconv.py
+eerie/nn/functional/sconv.py
+
+experiments/UrbanSound8K/data/*
+experiments/MagnaTagATune/data/
+
+wavelet_networks_venv/*
