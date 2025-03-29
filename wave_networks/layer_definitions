@@ -6,7 +6,7 @@ from torch import Tensor
 from jaxtyping import Float
 
 ##############################################################
-# 1. Spectro-Temporal Layers                                 #
+# 1. G-Lifting Layers (Spectro-Temporal Layers               #
 # Input: Audio timeseries: [B, T]                            #
 # Output: Time, frequency plane with C kernels: [B, C, T, S] #
 #                                                            #
@@ -15,6 +15,14 @@ from jaxtyping import Float
 ##############################################################
 
 class WaveletLayer(nn.Module):
+    """
+    Input: f:R->R
+    Output: B(f):G->R (exactly one channel)
+
+    Group convolution with (real) morlet wavelet kernel
+    p(x) = cos(5t) * e^{-t^2/2}
+    B(f)(s,t) = (f(x) * p(x/s)/s)(t)
+    """
     def __init__(self, S: int | None, kernel_size: int):
         super().__init__()
         self.S = S
@@ -34,13 +42,20 @@ class WaveletLayer(nn.Module):
         for j in range(n_scales):
             scale = 2 ** j
             padding = (self.kernel_size - 1) * scale // 2
-            out = F.conv1d(x, self.kernel, dilation=scale, padding=padding)
+            out = F.conv1d(x, self.kernel, dilation=scale, padding=padding)  # [B, 1, T]
             out = out / scale
             outputs.append(out.unsqueeze(-1))  # [B, 1, T, 1]
         return t.cat(outputs, dim=-1)  # [B, 1, T, S]
 
     
-class LearnableWaveletLayer(nn.Module):
+class LiftingConvolutionLayer(nn.Module):
+    """
+    Input: f:R->R
+    Output: B(f):G->R^C (multiple channels)
+
+    Group convolution with learned kernel p
+    B(f)(s,t) = (f(x) * p(x/s)/s)(t)
+    """
     def __init__(self, S: int | None, kernel_size: int, output_channels: int):
         super().__init__()
         self.S = S
@@ -62,126 +77,80 @@ class LearnableWaveletLayer(nn.Module):
         for j in range(n_scales):
             scale = 2 ** j
             padding = (self.kernel_size - 1) * scale // 2
-            out = F.conv1d(x, self.kernel, dilation=scale, padding=padding)
+            out = F.conv1d(x, self.kernel, dilation=scale, padding=padding)  # [B, C, T]
             out = out / scale
             outputs.append(out.unsqueeze(-1))  # [B, C, T, 1]
         return t.cat(outputs, dim=-1)  # [B, C, T, S]
 
 
 ##############################################################
-# 2. Convolutional Layers                                    #
+# 2. G-Convolutional Layers                                  #
 # Input: Time, frequency plane with C kernels: [B, C, T, S]  #
 # Output: Time, frequency plane with C kernels: [B, C, T, S] #
 #                                                            #
-#           
+# Performs convolutions over T, S and outputs T2, S2 shape   #        
 # scales 2^j for 1, 2, ..., 2^j < T / kernel_size            #
 ##############################################################
 
+class GroupConvolutionLayer(nn.Module):
+    """
+    Input: f:G->G
+    Output: B(f):G->R^C (multiple channels)
 
-class ScaleEquivariantTimeConvolutionLayer(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int, stride: int):
+    Group convolution with learned kernel p
+    B(f)(s,t) = (f(x) * p(x/s)/s)(t)
+    """
+    def __init__(self, input_channels: int, output_channels: int, kernel_size: int, stride: int):
         super().__init__()
-        # Conv2d with kernel_size=(1, kernel_size) to convolve over T only
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=(1, kernel_size),
-            stride=(1, stride)
-        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply convolution over time for each scale separately
+    def forward(self, x: Float[Tensor, "B C T S"]) -> Float[Tensor, "B C T S"]:
         return self.conv(x)
 
-class TimeConvolutionLayer(nn.Module):
-    """
-    Standard 2D convolutional layer over time and scale dimensions.
-    Input: [batch, in_channels, S, T]
-    Output: [batch, out_channels, S2, T2]
-    """
-    def __init__(self, in_channels: int, out_channels: int, kernel_size_T: int, kernel_size_S: int, stride: int):
-        super().__init__()
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=(kernel_size_S, kernel_size_T),
-            stride=(1, stride)
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-# 3. Audio Classifier
+##############################################################
+# 3. AudioClassifier                                         #
+# Input: Time, frequency plane with C kernels: [B, C, T, S]  #
+# Output: probabilities of n_classes: [n_classes]            #
+#                                                            #
+# G-Lifting Layers                                           #
+# G-Convolutional Layers 1, ..., G-Convolutional Layers (n-1)#
+# Mean-pooling over time                                     #
+# G-Convolution Layer: kernel_size=1, n_channels=n_classes   # 
+# Max-Pooling over scale                                     #
+# Softmax                                                    #
+##############################################################
 
 class AudioClassifier(nn.Module):
-    """
-    Modular neural network for audio classification.
-    Input: [batch, 1, T]
-    Output: [batch, n_classes]
-    """
-    def __init__(self, first_layer, conv_layers: list, n_classes: int):
+    def __init__(self, G_lifting_layer: nn.Module, G_convolutional_layers: list[nn.Module], n_classes: int):
         super().__init__()
-        self.first_layer = first_layer
-        self.conv_layers = nn.ModuleList(conv_layers)
-        # Batch normalization for first layer
-        self.bn_first = nn.BatchNorm2d(
-            first_layer.output_channels if hasattr(first_layer, 'output_channels') else 1
+        self.G_lifting_layer = G_lifting_layer
+        self.bn_G_lifting_layer = nn.BatchNorm2d(
+            G_lifting_layer.output_channels if hasattr(G_lifting_layer, 'output_channels') else 1  # in case of WaveletLayer
         )
-        # Batch normalization for convolutional layers
-        self.bn_layers = nn.ModuleList([
-            nn.BatchNorm2d(layer.out_channels) for layer in conv_layers
+        self.G_convolutional_layers = nn.ModuleList(G_convolutional_layers[:-1])
+        self.G_convolutional_layer_output = G_convolutional_layers[-1]
+        self.bn_G_convolutional_layers = nn.ModuleList([
+            nn.BatchNorm2d(layer.out_channels) for layer in self.G_convolutional_layers
         ])
         self.n_classes = n_classes
-        # Ensure the last conv layer has out_channels=n_classes
-        assert conv_layers[-1].out_channels == n_classes, "Last conv layer must have out_channels=n_classes"
+        assert self.G_convolutional_layers[-1].out_channels == n_classes
+        self.pool = nn.MaxPool2d(kernel_size=(4, 1), stride=(4, 1))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # First layer: Spectro-Temporal
-        x = self.first_layer(x)
-        x = self.bn_first(x)
-        x = F.relu(x)
-        # Convolutional layers
-        for conv, bn in zip(self.conv_layers, self.bn_layers):
+    def forward(self, x: Float[Tensor, "B T"]) -> Float[Tensor, "n_classes"]:
+        x = self.G_lifting_layer(x) # [B, C, T, S]
+        x = self.pool(x)  # [B, C, T/4, S]
+        x = self.bn_G_lifting_layer(x)  # [B, C, T/4, S]
+        x = F.relu(x)  # [B, C, T/4, S]
+
+        for conv, bn in zip(self.G_convolutional_layers, self.bn_G_convolutional_layers):
             x = conv(x)
+            x = self.pool(x)
             x = bn(x)
-            x = F.relu(x)
-        # Mean pooling over S and T dimensions
-        x = torch.mean(x, dim=[2, 3])  # [batch, n_classes]
-        # Softmax
-        x = F.softmax(x, dim=1)
-        return x
+            x = F.relu(x) # [B, C, T/4^k, S]
 
-# Example Usage
-if __name__ == "__main__":
-    # Parameters
-    S = 5
-    kernel_size = 2
-    output_channels_first = 16
-    n_classes = 10
-    T = 1024  # Example input length
+        x = t.mean(x, dim=2, keepdim=True)  # [B, C, 1, S]
+        x = self.G_convolutional_layer_output(x)  # [B, C, 1, S]
+        x = t.mean(x, dim=3, keepdim=True)  # [B, C, 1, 1]
+        x = x.squeeze(2).squeeze(2) # [B, C]
+        return x  # Logits
 
-    # Define layers
-    first_layer = LearnableWaveletLayer(S=S, kernel_size=kernel_size, output_channels=output_channels_first)
-    conv_layers = [
-        ScaleEquivariantTimeConvolutionLayer(
-            in_channels=output_channels_first,
-            out_channels=32,
-            kernel_size=3,
-            stride=1
-        ),
-        TimeConvolutionLayer(
-            in_channels=32,
-            out_channels=n_classes,
-            kernel_size_T=3,
-            kernel_size_S=3,
-            stride=1
-        )
-    ]
 
-    # Initialize model
-    model = AudioClassifier(first_layer, conv_layers, n_classes)
-
-    # Test with dummy input
-    x = torch.randn(2, 1, T)  # [batch=2, channels=1, T]
-    output = model(x)
-    print(f"Output shape: {output.shape}")  # Expected: [2, n_classes]
