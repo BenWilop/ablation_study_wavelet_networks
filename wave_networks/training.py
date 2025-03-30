@@ -1,147 +1,98 @@
 import torch as t
 import numpy as np
 import copy
-import experiments.UrbanSound8K.utils as utils
-from experiments.UrbanSound8K.tester import test
+from tqdm.notebook import tqdm
+from torch.utils.data import TensorDataset, DataLoader
+import wandb
+from datetime import datetime
+from wave_networks.prepare_data import DatasetAudioTimeseries
 
 
-def train(model, dataloaders, args, test_loader):
-    # Define loss
-    if 'M' in args.model:
-        criterion = torch.nn.CrossEntropyLoss()
-    elif '1DCNN' in args.model:
-        criterion = torch.nn.CrossEntropyLoss()
-    if args.wavelet_loss:
-        args.wl = utils.WaveletLoss(weight_loss=1.)
-
-    # Warm-up step
-    if args.warm_up == True:
-        # warm-up parameters
-        epochs_warm_up = 3
-        lr_warm_up = 0.1 * args.lr
-        # start warm-up
-        print('------- Starting warm-up -------')
-        # create optimizer
-        if args.optim == 'adam':
-            optimizer_warm_up = torch.optim.Adam(model.parameters(), lr=lr_warm_up, weight_decay=args.weight_decay)
-        if 'M' in args.model:
-            lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer_warm_up, step_size=1, gamma=2.0)
-        _, va, vl, ta, tl = _train(model, epochs_warm_up, criterion, optimizer_warm_up, dataloaders, args.device, lr_scheduler)
-        print('------- Finishing warm-up -------')
-
-    # create optimizer
-    if args.optim == 'adam':
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    elif args.optim == 'adadelta':
-        optimizer = torch.optim.Adadelta(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    # Get lr scheduler
-    if 'M' in args.model:
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
-    else: lr_scheduler = None
-
-    # train network
-    _, va, vl, ta, tl = _train(model, args.epochs, criterion, optimizer, dataloaders, args.device, lr_scheduler, args, test_loader)
-    # save model
-    torch.save(model.state_dict(), args.path)
-    # save history
-    history = np.array([va, vl, ta, tl])
-    np.save(args.path[:-4] + "_history.npy", history)
+def evaluate_model(model, loss_function, data, labels):
+    model.eval()
+    with t.no_grad():
+        logits = model(data)
+        loss = loss_function(logits, labels)
+        accuracy = (t.argmax(logits, 1) == labels).float().mean()
+    model.train()
+    return loss, accuracy
 
 
-def _train(model, epochs, criterion, optimizer, dataloader, device, lr_scheduler, args, test_loader):
-    # Accumulate information about the training history
-    val_acc_history = []
-    train_acc_history = []
-    loss_train_history = []
-    loss_val_history = []
-    # Save best performing weights
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_acc = 0.0
-    # iterate over epochs
-    for epoch in range(epochs):
-        print('Epoch {}/{}'.format(epoch + 1, epochs))
-        print('-' * 30)
-        # Print current learning rate
-        for param_group in optimizer.param_groups:
-            print('Learning Rate: {}'.format(param_group['lr']))
-        print('-' * 30)
+def train_model(model: t.nn.Module, model_name, dataset_audio_timeseries: DatasetAudioTimeseries, train_parameters, folder) -> t.nn.Module:
+    """
+    Code is partially from https://github.com/dwromero/wavelet_networks/blob/master/experiments/UrbanSound8K/trainer.py
+    """
+    wandb.finish()  # In case previous run did not get finished
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M")
+    experiment_name = f"experiment_{model_name}_{timestamp}"
+    wandb.init(
+        project="gdl_mini_project",
+        name=experiment_name,
+        config = train_parameters
+    )
 
-        # Each epoch consist of training and validation
-        for phase in ['train', 'validation']:
-            if phase == 'train': model.train()
-            else: model.eval()
+    loss_function = t.nn.CrossEntropyLoss()
+    best_validation_model_state = _train(model, loss_function, dataset_audio_timeseries, train_parameters)
+    model.load_state_dict(best_validation_model_state)
+    t.save(best_validation_model_state, folder + "/" + experiment_name)
 
-            # Accumulate accuracy and loss
-            running_loss = 0
-            running_corrects = 0
-            total = 0
-            # iterate over data
-            for inputs, labels in dataloader[phase]:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
+    # Test
+    test_loss, test_accuracy = evaluate_model(model,
+                                              loss_function,
+                                              dataset_audio_timeseries.test_data, 
+                                              dataset_audio_timeseries.test_labels
+                                              )
+    wandb.log({"test/loss": test_loss, "test/accuracy": test_accuracy})
 
-                optimizer.zero_grad()
-                with torch.set_grad_enabled(phase == 'train'):
-                    # FwrdPhase:
-                    outputs = model(inputs)
-                    if args.wavelet_loss:
-                        loss = criterion(outputs, labels) + args.wl(model)
-                    else:
-                        loss = criterion(outputs, labels)
-                    _, preds = torch.max(outputs, 1)
-                    # BwrdPhase:
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
-
-                # statistics
-                running_loss += loss.item() * inputs.size(0)
-                running_corrects += (preds == labels).sum().item()
-                total += labels.size(0)
-
-            # statistics of the epoch
-            epoch_loss = running_loss / total
-            epoch_acc = running_corrects / total
-            print('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_acc))
-            import datetime
-            print(datetime.datetime.now())
-
-            # Store results
-            if phase == 'train':
-                train_acc_history.append(epoch_acc)
-                loss_train_history.append(epoch_loss)
-            if phase == 'validation':
-                val_acc_history.append(epoch_acc)
-                loss_val_history.append(epoch_loss)
-
-                # Update step in ReduceOnPlateauScheduler
-                if lr_scheduler is not None:
-                    if lr_scheduler.__class__.__name__ == 'ReduceLROnPlateau':
-                        lr_scheduler.step(epoch_loss)
-
-            # If better validation accuracy, replace best weights
-            if phase == 'validation' and epoch_acc > best_acc:
-                best_acc = epoch_acc
-                best_model_wts = copy.deepcopy(model.state_dict())
-                print('Test accuracy:')
-                # Clean CUDA Memory
-                del inputs, outputs, labels
-                t.cuda.empty_cache()
-                # Perform test
-                test(model, test_loader, device)
-        print()
-
-    # Report best results
-    print('Best Val Acc: {:.4f}'.format(best_acc))
-    # Load best model weights
-    model.load_state_dict(best_model_wts)
-    # Return model and histories
-    return model, val_acc_history, loss_val_history, train_acc_history, loss_train_history
+    wandb.finish()
+    return model
 
 
+def _train(model, loss_function, dataset_audio_timeseries, train_parameters):
+    train_dataset = TensorDataset(
+        dataset_audio_timeseries.train_data,
+        dataset_audio_timeseries.train_labels,
+    )
+    train_loader = DataLoader(train_dataset, batch_size=train_parameters['batch_size'], shuffle=True)
 
+    optimizer = t.optim.Adam(model.parameters(), lr=train_parameters['learning_rate'], weight_decay=train_parameters['weight_decay'])
 
+    best_validation_loss = float('inf')
+    best_validation_model_state = copy.deepcopy(model.state_dict())
+    best_epoch = 0
+    patience_counter = 0
+    for epoch in tqdm(range(train_parameters['max_epochs']), desc="Training epochs", position=0, dynamic_ncols=True):
+        # Train
+        for data, labels in tqdm(train_loader, desc="Training batches", leave=False, position=1, dynamic_ncols=True):
+            optimizer.zero_grad()
+            logits = model(data)
+            loss = loss_function(logits, labels)
+            loss.backward()
+            optimizer.step()
 
+            # Log
+            accuracy = (t.argmax(logits, 1) == labels).float().mean()
+            wandb.log({"train/loss": loss, "train/accuracy": accuracy})
 
+        # Validation
+        validation_loss, validation_accuracy = evaluate_model(model, 
+                                                              loss_function,
+                                                              dataset_audio_timeseries.validation_data, 
+                                                              dataset_audio_timeseries.validation_labels
+                                                              )
+        if validation_loss < best_validation_loss:
+                best_validation_loss = validation_loss
+                best_validation_model_state = copy.deepcopy(model.state_dict())  # checkpoint best model
+                best_epoch = epoch
+                patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        wandb.log({"validation/loss": validation_loss, "validation/accuracy": validation_accuracy, "validation/best_epoch": best_epoch})
 
-
+        if patience_counter >= train_parameters['early_stopping_patience']:
+            print(f"Early stopping triggered at epoch {epoch}")
+            break
+    
+    return best_validation_model_state
+        
