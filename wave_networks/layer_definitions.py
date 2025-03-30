@@ -190,6 +190,7 @@ class AudioClassifier(nn.Module):
         x = self.G_convolutional_layer_output(x)  # [B, C, 1, S]
         x = t.max(x, dim=3, keepdim=True)[0]  # [B, C, 1, 1] Max-pool over scale
         x = x.squeeze(2).squeeze(2) # [B, C] <- each chanell will be one class, i.e. [B, n_classes]
+        print(x)
         return x  # Logits
 
 

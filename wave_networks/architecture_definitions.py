@@ -64,15 +64,33 @@ def build_WaveletNetwork() -> t.nn.Module:
                             bn_eps=eps)
 
 
+def build_medium_WaveletNetwork() -> t.nn.Module:
+    eps = 2e-5
+    n_channels_G = 1
+    n_classes = 10
+    
+    lifting_layer = LiftingConvolutionLayer(S=9, kernel_size=79, output_channels=n_channels_G)
+    group_conv1 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
+                                        output_channels=n_channels_G, kernel_size=3)
+    group_conv2 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
+                                        output_channels=n_classes, kernel_size=1)
+
+    G_convolutional_layers = [group_conv1, group_conv2]
+    return AudioClassifier(G_lifting_layer=lifting_layer,
+                            G_convolutional_layers=G_convolutional_layers,
+                            n_classes=n_classes,
+                            bn_eps=eps)
+
+
 def build_minimal_WaveletNetwork() -> t.nn.Module:
     eps = 2e-5
     n_channels_G = 1
     n_classes = 10
     
-    lifting_layer = LiftingConvolutionLayer(S=None, kernel_size=79, output_channels=1)
-    group_conv1 = GroupConvolutionLayer(S=None, input_channels=n_channels_G,
+    lifting_layer = LiftingConvolutionLayer(S=9, kernel_size=79, output_channels=1)
+    group_conv1 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
                                         output_channels=n_channels_G, kernel_size=11)
-    group_conv2 = GroupConvolutionLayer(S=None, input_channels=n_channels_G,
+    group_conv2 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
                                         output_channels=n_classes, kernel_size=1)
 
     G_convolutional_layers = [group_conv1, group_conv2]
