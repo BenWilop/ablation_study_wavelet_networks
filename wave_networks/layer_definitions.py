@@ -150,7 +150,7 @@ class AudioClassifier(nn.Module):
         super().__init__()
         self.G_lifting_layer = G_lifting_layer
         self.bn_G_lifting_layer = nn.BatchNorm2d(
-            G_lifting_layer.output_channels if hasattr(G_lifting_layer, 'output_channels') else 1  # in case of WaveletLayer,
+            G_lifting_layer.output_channels if hasattr(G_lifting_layer, 'output_channels') else 1,  # in case of WaveletLayer,
             eps=bn_eps
         )
         self.G_convolutional_layers = nn.ModuleList(G_convolutional_layers[:-1])
