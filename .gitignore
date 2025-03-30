@@ -16,3 +16,4 @@ __pycache__/
 data/*
 calculated_data/*
 trained_models/*
+wandb/*

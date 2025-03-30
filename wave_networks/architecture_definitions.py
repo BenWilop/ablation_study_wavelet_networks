@@ -10,7 +10,7 @@ class StandardConvolutionalNetwork(t.nn.Module):
     Code copied from https://github.com/dwromero/wavelet_networks/blob/master/experiments/UrbanSound8K/models/MNets_EtAl2016.py
     """
     def __init__(self):
-        super(self).__init__()
+        super().__init__()
         # Parameters of the model
         use_bias = False
         eps = 2e-5
@@ -69,10 +69,10 @@ def build_minimal_WaveletNetwork() -> t.nn.Module:
     n_channels_G = 1
     n_classes = 10
     
-    lifting_layer = LiftingConvolutionLayer(kernel_size=79, output_channels=1)
-    group_conv1 = GroupConvolutionLayer(input_channels=n_channels_G,
-                                        output_channels=n_channels_G, kernel_size=10)
-    group_conv2 = GroupConvolutionLayer(input_channels=n_channels_G,
+    lifting_layer = LiftingConvolutionLayer(S=None, kernel_size=79, output_channels=1)
+    group_conv1 = GroupConvolutionLayer(S=None, input_channels=n_channels_G,
+                                        output_channels=n_channels_G, kernel_size=11)
+    group_conv2 = GroupConvolutionLayer(S=None, input_channels=n_channels_G,
                                         output_channels=n_classes, kernel_size=1)
 
     G_convolutional_layers = [group_conv1, group_conv2]
@@ -84,14 +84,15 @@ def build_minimal_WaveletNetwork() -> t.nn.Module:
 
 def build_2D_ConvolutionalNet() -> t.nn.Module:
     n_classes = 10
-    wavelet_layer = WaveletLayer(kernel_size=79)
+    wavelet_layer = WaveletLayer(S=None, kernel_size=79)
 
-    conv1 = t.Conv2dLayer(in_channels=1, out_channels=32, kernel_size=3, bias=False)
-    conv2 = t.Conv2dLayer(in_channels=32, out_channels=64, kernel_size=3, bias=False)
-    conv3 = t.Conv2dLayer(in_channels=64, out_channels=n_classes, kernel_size=3, bias=False)
+    conv1 = t.nn.Conv2d(in_channels=1, out_channels=32, kernel_size=3, bias=False)
+    conv2 = t.nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, bias=False)
+    conv3 = t.nn.Conv2d(in_channels=64, out_channels=n_classes, kernel_size=3, padding=1, bias=False)
     conv_layers = [conv1, conv2, conv3]
     
     model = AudioClassifier(G_lifting_layer=wavelet_layer,
                             G_convolutional_layers=conv_layers,
-                            n_classes=n_classes)
+                            n_classes=n_classes,
+                            bn_eps=2e-5)
     return model

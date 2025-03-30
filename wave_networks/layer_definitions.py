@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from torch import Tensor
-from jaxtyping import Float
+from typing import Optional, List
 
 ##############################################################
 # 1. G-Lifting Layers (Spectro-Temporal Layers               #
@@ -23,20 +23,20 @@ class WaveletLayer(nn.Module):
     p(x) = cos(5t) * e^{-t^2/2}
     B(f)(s,t) = (f(x) * p(x/s)/s)(t)
     """
-    def __init__(self, S: int | None, kernel_size: int):
+    def __init__(self, S: Optional[int], kernel_size: int):
         super().__init__()
         self.S = S
         self.kernel_size = kernel_size
         time = t.linspace(-3, 3, kernel_size)
-        self.kernel = t.cos(5.0 * time) * t.exp(-time ** 2 / 2)
+        self.kernel = t.cos(5.0 * time) * t.exp(-time ** 2 / 2).unsqueeze(0).unsqueeze(0)  # [K] -> [1, 1, K] to convolve with [Cin Cout T]
 
-    def forward(self, x: Float[Tensor, "B T"]) -> Float[Tensor, "B 1 T S"]:
-        T = x.shape[1]
+    def forward(self, x):  # -> [B, 1, T, S]
+        # x [B, 1, T]
+        T = x.shape[2]
         if self.S is not None:
             n_scales = self.S
         else:
-            n_scales = max(1, int(t.log2(T / self.kernel_size)))
-        x = x.unsqueeze(1)  # [B, 1, T]
+            n_scales = max(1, int(math.log2(T / self.kernel_size)))
         
         outputs = []
         for j in range(n_scales):
@@ -56,7 +56,7 @@ class LiftingConvolutionLayer(nn.Module):
     Group convolution with learned kernel p
     B(f)(s,t) = (f(x) * p(x/s)/s)(t)
     """
-    def __init__(self, S: int | None, kernel_size: int, output_channels: int):
+    def __init__(self, S: Optional[int], kernel_size: int, output_channels: int):
         super().__init__()
         self.S = S
         self.kernel_size = kernel_size
@@ -65,13 +65,13 @@ class LiftingConvolutionLayer(nn.Module):
             t.randn(output_channels, 1, kernel_size)
         )
 
-    def forward(self, x: Float[Tensor, "B T"]) -> Float[Tensor, "B C T S"]:
-        T = x.shape[1]
+    def forward(self, x):  # -> [B, C, T, S]
+        # x [B, 1, T]
+        T = x.shape[2]
         if self.S is not None:
             n_scales = self.S
         else:
-            n_scales = max(1, int(t.log2(T / self.kernel_size)))
-        x = x.unsqueeze(1)  # [B, 1, T]
+            n_scales = max(1, int(math.log2(T / self.kernel_size)))
 
         outputs = []
         for j in range(n_scales):
@@ -98,36 +98,40 @@ class GroupConvolutionLayer(nn.Module):
     Output: B(f):G->R^C (multiple channels)
 
     Group convolution with learned kernel p
-    B(f)(s,t) = (f(x) * p(x/s)/s)(t)
+    B(f)(s,t) = sum_z (f(x, z) * p(x/s)/s^2)(t)
     """
-    def __init__(self, S: int | None, input_channels: int, output_channels: int, kernel_size: int):
+    def __init__(self, S: Optional[int], input_channels: int, output_channels: int, kernel_size: int):
         super().__init__()
         self.S = S
         self.kernel_size = kernel_size
         self.output_channels = output_channels
         self.kernel = nn.Parameter(
-            t.randn(input_channels, output_channels, 1, kernel_size)
+            t.randn(output_channels, input_channels, kernel_size)
         )
 
-    def forward(self, x: Float[Tensor, "B C T S"]) -> Float[Tensor, "B C T S"]:
-        T = x.shape[2]
+    def forward(self, x):  # -> [B, C, T, S]
+        # x [B, C, T, S]
+        B, C, T, S_in = x.shape
         if self.S is not None:
             n_scales = self.S
         else:
-            n_scales = max(1, int(t.log2(T / self.kernel_size)))
+            n_scales = max(1, int(math.log2(T / self.kernel_size)))
+
+        integration_weights = t.tensor([1] + [2**(z-1) for z in range(1, S_in)], device=x.device, dtype=x.dtype)  # [S_in]
+        integration_weights = integration_weights.view(1, 1, 1, S_in)  # [B, C, T, n_scales]
 
         outputs = []
         for j in range(n_scales):
             scale = 2 ** j
-            padding = (self.kernel_size - 1) * scale // 2
-            out = t.zeros(x.shape[0], self.kernel.shape[1], T, device=x.device, dtype=x.dtype)  # [B, C, T]
-            for z in range(n_scales):
-                if z == 0:
-                    integration_weight = 1
-                else:
-                    integration_weight = 2**(z-1)
-                out += integration_weight * F.conv1d(x[:, :, :, z], self.kernel, dilation=scale, padding=padding)  # [B, C, T]
-            out = out / scale**2
+            padding = scale * (self.kernel_size - 1) // 2
+            
+            x_perm = x.permute(0, 3, 1, 2)  # [B, S, C, T]
+            x_reshaped = x_perm.reshape(B * S_in , C, T)  # [B*S_in, C, T]
+            conv_out = F.conv1d(x_reshaped, self.kernel, dilation=scale, padding=padding)  # [B*S_in, C=out_channels, T]
+            conv_out = conv_out.reshape(B, S_in , self.kernel.shape[0], T)  # [B, S_in, C, T]
+            conv_out = conv_out.permute(0, 2, 3, 1)  # [B, C, T, S_in]
+            out = (conv_out * integration_weights).sum(dim=3) / (scale**2)  # [B, C, T]
+
             outputs.append(out.unsqueeze(-1))  # [B, C, T, 1]
         return t.cat(outputs, dim=-1)  # [B, C, T, S]
     
@@ -146,7 +150,7 @@ class GroupConvolutionLayer(nn.Module):
 ##############################################################
 
 class AudioClassifier(nn.Module):
-    def __init__(self, G_lifting_layer: nn.Module, G_convolutional_layers: list[nn.Module], n_classes: int, bn_eps: float):
+    def __init__(self, G_lifting_layer: nn.Module, G_convolutional_layers: List[nn.Module], n_classes: int, bn_eps: float):
         super().__init__()
         self.G_lifting_layer = G_lifting_layer
         self.bn_G_lifting_layer = nn.BatchNorm2d(
@@ -156,13 +160,21 @@ class AudioClassifier(nn.Module):
         self.G_convolutional_layers = nn.ModuleList(G_convolutional_layers[:-1])
         self.G_convolutional_layer_output = G_convolutional_layers[-1]
         self.bn_G_convolutional_layers = nn.ModuleList([
-            nn.BatchNorm2d(layer.out_channels, eps=bn_eps) for layer in self.G_convolutional_layers
+            nn.BatchNorm2d(
+                layer.out_channels if hasattr(layer, 'out_channels') else layer.output_channels, 
+                eps=bn_eps
+            )
+            for layer in self.G_convolutional_layers
         ])
         self.n_classes = n_classes
-        assert self.G_convolutional_layers[-1].out_channels == n_classes
+        if hasattr(self.G_convolutional_layer_output, 'out_channels'):
+            output_channels = self.G_convolutional_layer_output.out_channels
+        else:
+            output_channels = self.G_convolutional_layer_output.output_channels
         self.pool = nn.MaxPool2d(kernel_size=(4, 1), stride=(4, 1))
 
-    def forward(self, x: Float[Tensor, "B T"]) -> Float[Tensor, "n_classes"]:
+    def forward(self, x):  # -> [n_classes]
+        # x [B, T]
         x = self.G_lifting_layer(x) # [B, C, T, S]
         x = self.pool(x)  # [B, C, T/4, S]
         x = self.bn_G_lifting_layer(x)  # [B, C, T/4, S]
@@ -174,10 +186,10 @@ class AudioClassifier(nn.Module):
             x = bn(x)
             x = F.relu(x) # [B, C, T/4^k, S]
 
-        x = t.mean(x, dim=2, keepdim=True)  # [B, C, 1, S]
+        x = t.mean(x, dim=2, keepdim=True)  # [B, C, 1, S]  Mean-pool over time
         x = self.G_convolutional_layer_output(x)  # [B, C, 1, S]
-        x = t.mean(x, dim=3, keepdim=True)  # [B, C, 1, 1]
-        x = x.squeeze(2).squeeze(2) # [B, C]
+        x = t.max(x, dim=3, keepdim=True)[0]  # [B, C, 1, 1] Max-pool over scale
+        x = x.squeeze(2).squeeze(2) # [B, C] <- each chanell will be one class, i.e. [B, n_classes]
         return x  # Logits
 
 
