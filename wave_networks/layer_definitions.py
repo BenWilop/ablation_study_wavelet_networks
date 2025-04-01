@@ -43,7 +43,7 @@ class WaveletLayer(nn.Module):
             scale = 2 ** j
             padding = (self.kernel_size - 1) * scale // 2
             out = F.conv1d(x, self.kernel, dilation=scale, padding=padding)  # [B, 1, T]
-            out = out / scale
+            # out = out / scale  # dont normalize because of expanded kernel
             outputs.append(out.unsqueeze(-1))  # [B, 1, T, 1]
         return t.cat(outputs, dim=-1)  # [B, 1, T, S]
 
@@ -76,9 +76,9 @@ class LiftingConvolutionLayer(nn.Module):
         outputs = []
         for j in range(n_scales):
             scale = 2 ** j
-            padding = (self.kernel_size - 1) * scale // 2
+            padding = (self.kernel_size - 1) * scale // 2  
             out = F.conv1d(x, self.kernel, dilation=scale, padding=padding)  # [B, C, T]
-            out = out / scale
+            # out = out / scale  # dont normalize because of expanded kernel
             outputs.append(out.unsqueeze(-1))  # [B, C, T, 1]
         return t.cat(outputs, dim=-1)  # [B, C, T, S]
 
@@ -130,7 +130,7 @@ class GroupConvolutionLayer(nn.Module):
             conv_out = F.conv1d(x_reshaped, self.kernel, dilation=scale, padding=padding)  # [B*S_in, C=out_channels, T]
             conv_out = conv_out.reshape(B, S_in , self.kernel.shape[0], T)  # [B, S_in, C, T]
             conv_out = conv_out.permute(0, 2, 3, 1)  # [B, C, T, S_in]
-            out = (conv_out * integration_weights).sum(dim=3) / (scale**2)  # [B, C, T]
+            out = (conv_out * integration_weights).sum(dim=3) / (scale)  # [B, C, T]  # here only /s instead of /s**2 because of expanded kernel
 
             outputs.append(out.unsqueeze(-1))  # [B, C, T, 1]
         return t.cat(outputs, dim=-1)  # [B, C, T, S]
@@ -190,7 +190,6 @@ class AudioClassifier(nn.Module):
         x = self.G_convolutional_layer_output(x)  # [B, C, 1, S]
         x = t.max(x, dim=3, keepdim=True)[0]  # [B, C, 1, 1] Max-pool over scale
         x = x.squeeze(2).squeeze(2) # [B, C] <- each chanell will be one class, i.e. [B, n_classes]
-        print(x)
         return x  # Logits
 
 

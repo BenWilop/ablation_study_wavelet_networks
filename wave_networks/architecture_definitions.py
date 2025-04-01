@@ -66,12 +66,12 @@ def build_WaveletNetwork() -> t.nn.Module:
 
 def build_medium_WaveletNetwork() -> t.nn.Module:
     eps = 2e-5
-    n_channels_G = 1
+    n_channels_G = 10
     n_classes = 10
     
     lifting_layer = LiftingConvolutionLayer(S=9, kernel_size=79, output_channels=n_channels_G)
     group_conv1 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
-                                        output_channels=n_channels_G, kernel_size=3)
+                                        output_channels=n_channels_G, kernel_size=11)
     group_conv2 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
                                         output_channels=n_classes, kernel_size=1)
 
@@ -87,10 +87,10 @@ def build_minimal_WaveletNetwork() -> t.nn.Module:
     n_channels_G = 1
     n_classes = 10
     
-    lifting_layer = LiftingConvolutionLayer(S=9, kernel_size=79, output_channels=1)
-    group_conv1 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
+    lifting_layer = LiftingConvolutionLayer(S=None, kernel_size=79, output_channels=1)
+    group_conv1 = GroupConvolutionLayer(S=None, input_channels=n_channels_G,
                                         output_channels=n_channels_G, kernel_size=11)
-    group_conv2 = GroupConvolutionLayer(S=3, input_channels=n_channels_G,
+    group_conv2 = GroupConvolutionLayer(S=None, input_channels=n_channels_G,
                                         output_channels=n_classes, kernel_size=1)
 
     G_convolutional_layers = [group_conv1, group_conv2]
